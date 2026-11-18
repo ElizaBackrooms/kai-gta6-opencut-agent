@@ -3,7 +3,7 @@
 ## Project Overview
 Autonomous **Kai Cenat GTA 6 Live Stream Auto-Clipper, OpenCut 9:16 Vertical Editor & Google Drive Bot**.
 
-- **Twitch Source (`src/sources/twitch.ts`)**: Polls Twitch GQL (`twitch.tv/kaicenat`) for live `Grand Theft Auto VI` status, captures live HLS segments (skipping Twitch's 30s pre-roll slate with `-ss 34` and filtering out commercial breaks), scores hype moments (audio `volumedetect` dB + Whisper transcript keywords/pace), and fetches top viral GTA 6 clips.
+- **Twitch Source (`src/sources/twitch.ts`)**: Polls Twitch GQL (`twitch.tv/kaicenat`) for live `Grand Theft Auto VI` status, records 10-minute HLS chunks (skipping Twitch's 30s pre-roll slate with `-ss 34` and filtering out commercial breaks), mines ~40s viral windows (audio loudness + Whisper keywords/pace), edits those clips, deletes the long source after the edit is saved, and fetches top viral GTA 6 clips.
 - **Transcription (`src/editor/transcribe.ts`)**: Extracts 16kHz mono WAV via `ffmpeg` and transcribes word-level timings with local `whisper-cli.exe` (`ggml-base.en.bin`).
 - **OpenCut Project (`src/editor/opencutProject.ts`)**: Validates and generates `VideoProjectConfig`, `VideoConfig`, `TimelineSegment[]`, and `SubtitleSegment[]` via `opencut` (`validateProject`), writing artifacts to `public/projects/<slug>/`.
 - **Renderer (`src/editor/render.ts`, `src/video/KaiClipComposition.tsx`)**: Produces `1080x1920` (`30fps`, `h264`/`aac`) split-screen Shorts/TikToks via the fast `ffmpeg` ASS compositor (default) or `--renderer remotion`, verified with `ffprobe`.

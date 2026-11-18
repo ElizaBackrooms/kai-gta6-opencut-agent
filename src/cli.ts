@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 import { Command } from "commander";
 import { config, ensureDirectories } from "./config.js";
@@ -102,6 +103,12 @@ async function processCandidate(
     viewCount: candidate.viewCount,
     gameName: candidate.gameName,
   });
+
+  if (fs.existsSync(outputPath) && fs.statSync(outputPath).size > 0) {
+    fs.rmSync(candidate.rawPath, { force: true });
+    fs.rmSync(path.join(projectWorkDir, "audio16k.wav"), { force: true });
+    console.log(`[cleanup] Removed source media for ${candidate.slug} after the edit was saved.`);
+  }
 }
 
 export async function runOnceCycle(opts: CycleOptions): Promise<number> {
@@ -129,14 +136,12 @@ export async function runOnceCycle(opts: CycleOptions): Promise<number> {
 
   if (opts.includeLive && status.isLive && (status.isGta6 || opts.forceLive)) {
     try {
-      const liveSeg = await captureAndScoreLiveSegment({
+      const liveSegs = await captureAndScoreLiveSegment({
         durationSec: opts.liveDuration,
         minHypeScore: opts.minHype,
         forceKeep: opts.forceLive,
       });
-      if (liveSeg) {
-        candidates.push(liveSeg);
-      }
+      candidates.push(...liveSegs);
     } catch (err) {
       console.warn(`[live] Live capture warning: ${String(err)}`);
     }
@@ -145,13 +150,17 @@ export async function runOnceCycle(opts: CycleOptions): Promise<number> {
   const latestState = loadState();
   const excludeSlugs = new Set(Object.keys(latestState.processedClips));
   if (opts.maxClips > 0) {
-    const viralClips = await fetchViralGta6Clips({
-      limit: opts.maxClips,
-      period: opts.period,
-      excludeSlugs,
-    });
-    console.log(`[twitch] Found ${viralClips.length} new GTA 6 viral clip(s) to process.`);
-    candidates.push(...viralClips);
+    try {
+      const viralClips = await fetchViralGta6Clips({
+        limit: opts.maxClips,
+        period: opts.period,
+        excludeSlugs,
+      });
+      console.log(`[twitch] Found ${viralClips.length} new GTA 6 viral clip(s) to process.`);
+      candidates.push(...viralClips);
+    } catch (err) {
+      console.warn(`[twitch] Viral clip fetch warning: ${String(err)}`);
+    }
   }
 
   let processedCount = 0;
@@ -185,7 +194,7 @@ program
   .option("--include-live", "Capture & score live stream segment when live on GTA 6", true)
   .option("--no-include-live", "Skip live stream capture")
   .option("--force-live", "Keep live segment regardless of hype score threshold", false)
-  .option("--live-duration <seconds>", "Duration of live stream capture segment", "25")
+  .option("--live-duration <seconds>", "Duration of live stream capture segment", "600")
   .option("--min-hype <score>", "Minimum hype score (0-100) to keep live segment", "35")
   .option("--period <period>", "Twitch clip period: LAST_DAY or LAST_WEEK", "LAST_WEEK")
   .option("--renderer <backend>", "Render backend: ffmpeg or remotion", "ffmpeg")
@@ -208,7 +217,7 @@ program
   .description("Continuously monitor Kai Cenat live stream + new GTA 6 clips and upload to Google Drive")
   .option("--interval <seconds>", "Polling interval between cycles", "180")
   .option("--max-clips <number>", "Max new viral clips per cycle", "2")
-  .option("--live-duration <seconds>", "Duration of each live stream capture", "25")
+  .option("--live-duration <seconds>", "Duration of each live stream capture", "600")
   .option("--min-hype <score>", "Minimum hype score (0-100) to keep live segment", "40")
   .option("--renderer <backend>", "Render backend: ffmpeg or remotion", "ffmpeg")
   .action(async (rawOpts) => {

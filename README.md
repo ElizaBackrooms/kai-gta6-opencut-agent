@@ -44,7 +44,7 @@ flowchart LR
 
 1. **Hybrid Twitch Live Stream & Viral Clip Source (`src/sources/twitch.ts`)**
    - Polls Twitch's GQL API for live `Grand Theft Auto VI` status (`getChannelStatus`) and top GTA 6 clips (`fetchViralGta6Clips`) ranked by recency and view velocity.
-   - Pulls live HLS streams (`usher.ttvnw.net`), detects Twitch's 30-second `PREROLL` commercial slate in the HLS playlist, skips past it (`-ss 34`), filters out commercial-break transcripts, and computes a 0–100 `hypeScore` using `ffmpeg -af volumedetect` dB peaks + speech pace + hype keywords.
+   - Pulls live HLS streams (`usher.ttvnw.net`), detects Twitch's 30-second `PREROLL` commercial slate in the HLS playlist, skips past it (`-ss 34`), and records a 10-minute chunk. Whisper word timings plus per-second loudness mine up to three non-overlapping ~40s viral windows. Each window is edited, then the 10-minute source and the cut's raw file are deleted once the vertical edit is saved.
 2. **Word-Level Whisper Alignment (`src/editor/transcribe.ts`)**
    - Converts clip audio to 16kHz mono WAV and runs local `whisper-cli` (`ggml-base.en.bin`) with `-ojf -ml 1 -sow` for exact word timestamps grouped into OpenCut `SubtitleSegment[]`.
 3. **Validated OpenCut Timeline Generation (`src/editor/opencutProject.ts`)**
@@ -110,7 +110,7 @@ npm run build && npm test
 | --- | --- |
 | `src/config.ts` | Cross-platform binary paths (`ffmpeg`, `ffprobe`, `whisper-cli`), Twitch channel & facecam crop config |
 | `src/state.ts` | Persistent JSON state store (`data/state.json`) tracking `kaiclips` folder ID & processed clips |
-| `src/sources/twitch.ts` | Twitch GQL client, viral GTA 6 clip fetcher, live HLS recorder, pre-roll skip & hype scorer |
+| `src/sources/twitch.ts` | Twitch GQL client, viral GTA 6 clip fetcher, 10-minute HLS recorder, viral-window miner, pre-roll skip & hype scorer |
 | `src/editor/transcribe.ts` | FFprobe media inspector & local `whisper.cpp` word-level transcription |
 | `src/editor/opencutProject.ts` | OpenCut `VideoProjectConfig` & `TimelineSegment[]` builder + `validateProject` check |
 | `src/editor/render.ts` | Dual FFmpeg ASS / Remotion 1080x1920 vertical compositor + output verification |

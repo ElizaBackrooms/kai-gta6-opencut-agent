@@ -2,7 +2,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { config, ensureDirectories } from "../config.js";
-import { transcribeMedia } from "../editor/transcribe.js";
+import { probeMedia, transcribeMedia } from "../editor/transcribe.js";
 
 const TWITCH_GQL_URL = "https://gql.twitch.tv/gql";
 
@@ -262,7 +262,7 @@ export async function fetchViralGta6Clips(opts: {
     } | null;
   }>(query);
 
-  const edges = data.user?.clips.edges ?? [];
+  const edges = data.user?.clips?.edges ?? [];
   const nowMs = Date.now();
 
   const gtaClips = edges
@@ -391,6 +391,213 @@ export function scoreHypeMoment(opts: {
   return { score: total, matchedKeywords };
 }
 
+export interface TimedWord {
+  word: string;
+  start: number;
+  end: number;
+}
+
+export interface LoudnessPoint {
+  time: number;
+  rms: number;
+  peak: number;
+}
+
+export interface MinedClipWindow {
+  startSec: number;
+  endSec: number;
+  score: number;
+  matchedKeywords: string[];
+  transcript: string;
+  wordCount: number;
+}
+
+export const MINED_CLIP_SEC = 40;
+export const MINED_CLIP_STEP_SEC = 10;
+export const MINED_CLIP_MAX = 3;
+const MINE_RECORDING_SEC = 90;
+
+function finiteDb(raw: string): number {
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : -60;
+}
+
+export function parseLoudnessTimeline(text: string): LoudnessPoint[] {
+  const points: LoudnessPoint[] = [];
+  let time = 0;
+  let rms: number | null = null;
+  let peak: number | null = null;
+  const flush = () => {
+    if (rms == null && peak == null) return;
+    points.push({
+      time,
+      rms: rms ?? peak ?? -40,
+      peak: peak ?? rms ?? -40,
+    });
+    rms = null;
+    peak = null;
+  };
+
+  for (const line of text.split(/\r?\n/)) {
+    const timeMatch = line.match(/pts_time:([0-9.]+)/);
+    if (timeMatch) {
+      flush();
+      time = Number(timeMatch[1]);
+      continue;
+    }
+    const rmsMatch = line.match(/Overall\.RMS_level=(-?[\d.]+|inf|-inf)/i);
+    if (rmsMatch) {
+      rms = finiteDb(rmsMatch[1]);
+      continue;
+    }
+    const peakMatch = line.match(/Overall\.Peak_level=(-?[\d.]+|inf|-inf)/i);
+    if (peakMatch) peak = finiteDb(peakMatch[1]);
+  }
+  flush();
+  return points;
+}
+
+export function volumeInWindow(
+  points: LoudnessPoint[],
+  startSec: number,
+  endSec: number,
+): { meanVolumeDb: number; maxVolumeDb: number } {
+  const slice = points.filter((point) => point.time >= startSec && point.time < endSec);
+  if (!slice.length) return { meanVolumeDb: -25, maxVolumeDb: -8 };
+  const meanVolumeDb = slice.reduce((sum, point) => sum + point.rms, 0) / slice.length;
+  const maxVolumeDb = Math.max(...slice.map((point) => point.peak));
+  return { meanVolumeDb, maxVolumeDb };
+}
+
+export function pickMinedClips(opts: {
+  words: TimedWord[];
+  durationSec: number;
+  minHypeScore: number;
+  maxClips?: number;
+  clipSec?: number;
+  stepSec?: number;
+  forceKeep?: boolean;
+  volumeForWindow?: (startSec: number, endSec: number) => { meanVolumeDb: number; maxVolumeDb: number };
+}): MinedClipWindow[] {
+  const clipSec = opts.clipSec ?? MINED_CLIP_SEC;
+  const stepSec = opts.stepSec ?? MINED_CLIP_STEP_SEC;
+  const maxClips = opts.maxClips ?? MINED_CLIP_MAX;
+  const durationSec = Math.max(0, opts.durationSec);
+  const volumeForWindow =
+    opts.volumeForWindow ?? (() => ({ meanVolumeDb: -22, maxVolumeDb: -6 }));
+
+  const starts: number[] = [];
+  if (durationSec <= clipSec + 1) {
+    starts.push(0);
+  } else {
+    for (let start = 0; start + 12 <= durationSec; start += stepSec) {
+      starts.push(Number(start.toFixed(3)));
+      if (start + clipSec >= durationSec) break;
+    }
+    const tail = Number(Math.max(0, durationSec - clipSec).toFixed(3));
+    const last = starts[starts.length - 1];
+    if (last == null || tail - last > stepSec * 0.5) starts.push(tail);
+  }
+
+  const ranked: MinedClipWindow[] = [];
+  for (const startSec of starts) {
+    const endSec = Number(Math.min(durationSec, startSec + clipSec).toFixed(3));
+    const span = endSec - startSec;
+    if (span < 12) continue;
+    const slice = opts.words.filter((word) => word.start >= startSec && word.start < endSec);
+    const transcript = slice.map((word) => word.word).join(" ");
+    if (/commercial break/i.test(transcript)) continue;
+    const volume = volumeForWindow(startSec, endSec);
+    const { score, matchedKeywords } = scoreHypeMoment({
+      meanVolumeDb: volume.meanVolumeDb,
+      maxVolumeDb: volume.maxVolumeDb,
+      transcript,
+      wordCount: slice.length,
+      durationSec: span,
+    });
+    ranked.push({ startSec, endSec, score, matchedKeywords, transcript, wordCount: slice.length });
+  }
+
+  const pool = opts.forceKeep ? ranked : ranked.filter((window) => window.score >= opts.minHypeScore);
+  const sorted = [...pool].sort((a, b) => b.score - a.score || a.startSec - b.startSec);
+  const picked: MinedClipWindow[] = [];
+  for (const window of sorted) {
+    if (picked.length >= maxClips) break;
+    const overlaps = picked.some(
+      (kept) => window.startSec < kept.endSec - 1 && window.endSec > kept.startSec + 1,
+    );
+    if (!overlaps) picked.push(window);
+  }
+  return picked.sort((a, b) => a.startSec - b.startSec);
+}
+
+function measureLoudnessTimeline(mediaPath: string, workDir: string): LoudnessPoint[] {
+  fs.mkdirSync(workDir, { recursive: true });
+  const statsPath = path.join(workDir, "loudness.txt");
+  fs.rmSync(statsPath, { force: true });
+  try {
+    execFileSync(
+      config.binaries.ffmpeg,
+      [
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        mediaPath,
+        "-vn",
+        "-af",
+        "aresample=1000,astats=reset=1000:metadata=1,ametadata=print:file=loudness.txt",
+        "-f",
+        "null",
+        "NUL",
+      ],
+      { cwd: workDir, stdio: "pipe", maxBuffer: 10 * 1024 * 1024 },
+    );
+  } catch {
+    return [];
+  }
+  if (!fs.existsSync(statsPath)) return [];
+  return parseLoudnessTimeline(fs.readFileSync(statsPath, "utf8"));
+}
+
+function cutLiveClip(sourcePath: string, destPath: string, startSec: number, durationSec: number): void {
+  execFileSync(
+    config.binaries.ffmpeg,
+    [
+      "-y",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-ss",
+      startSec.toFixed(3),
+      "-i",
+      sourcePath,
+      "-t",
+      durationSec.toFixed(3),
+      "-c:v",
+      "libx264",
+      "-preset",
+      "veryfast",
+      "-crf",
+      "21",
+      "-c:a",
+      "aac",
+      "-b:a",
+      "160k",
+      "-movflags",
+      "+faststart",
+      destPath,
+    ],
+    { stdio: "pipe", maxBuffer: 10 * 1024 * 1024 },
+  );
+}
+
+function deleteRecording(rawPath: string, projectDir: string): void {
+  fs.rmSync(rawPath, { force: true });
+  fs.rmSync(projectDir, { recursive: true, force: true });
+}
+
 function buildLiveTitle(transcript: string, streamTitle?: string): string {
   const clean = transcript.replace(/\s+/g, " ").trim();
   if (clean.length >= 12) {
@@ -404,16 +611,16 @@ export async function captureAndScoreLiveSegment(opts?: {
   durationSec?: number;
   minHypeScore?: number;
   forceKeep?: boolean;
-}): Promise<ClipCandidate | null> {
+}): Promise<ClipCandidate[]> {
   ensureDirectories();
-  const durationSec = opts?.durationSec ?? 25;
+  const durationSec = opts?.durationSec ?? 600;
   const minHypeScore = opts?.minHypeScore ?? 45;
   const forceKeep = opts?.forceKeep ?? false;
 
   const status = await getChannelStatus(config.streamer.channelLogin);
   if (!status.isLive) {
     console.log(`[live] ${config.streamer.channelLogin} is currently offline.`);
-    return null;
+    return [];
   }
 
   const query = `{
@@ -461,6 +668,9 @@ export async function captureAndScoreLiveSegment(opts?: {
     config.binaries.ffmpeg,
     [
       "-y",
+      "-hide_banner",
+      "-loglevel",
+      "error",
       "-i",
       variantUrl,
       "-ss",
@@ -484,52 +694,121 @@ export async function captureAndScoreLiveSegment(opts?: {
     { stdio: "pipe", maxBuffer: 25 * 1024 * 1024 },
   );
 
-  const { meanVolumeDb, maxVolumeDb } = measureAudioDb(rawPath);
+  const recordedSec = probeMedia(rawPath).durationSec || durationSec;
+  const projectDir = path.join(config.projectsDir, slug);
   const transcriptRes = transcribeMedia({
     mediaPath: rawPath,
     workDir: probeWorkDir,
     fallbackText: status.title ?? "KAI CENAT GTA VI LIVE",
-    durationSec,
+    durationSec: recordedSec,
   });
 
-  if (/commercial break/i.test(transcriptRes.fullText)) {
-    console.log(`[live] Segment was a Twitch commercial break; discarding.`);
-    fs.rmSync(rawPath, { force: true });
-    fs.rmSync(path.join(config.projectsDir, slug), { recursive: true, force: true });
-    return null;
+  if (recordedSec < MINE_RECORDING_SEC) {
+    if (/commercial break/i.test(transcriptRes.fullText)) {
+      console.log(`[live] Segment was a Twitch commercial break; discarding.`);
+      deleteRecording(rawPath, projectDir);
+      return [];
+    }
+
+    const { meanVolumeDb, maxVolumeDb } = measureAudioDb(rawPath);
+    const { score, matchedKeywords } = scoreHypeMoment({
+      meanVolumeDb,
+      maxVolumeDb,
+      transcript: transcriptRes.fullText,
+      wordCount: transcriptRes.words.length,
+      durationSec: recordedSec,
+    });
+
+    console.log(
+      `[live] Hype score=${score}/100 (max=${maxVolumeDb}dB, mean=${meanVolumeDb}dB, words=${transcriptRes.words.length}, kw=[${matchedKeywords.join(", ")}])`,
+    );
+
+    if (!forceKeep && score < minHypeScore) {
+      console.log(`[live] Score ${score} below threshold ${minHypeScore}; discarding segment.`);
+      deleteRecording(rawPath, projectDir);
+      return [];
+    }
+
+    return [
+      {
+        id: status.streamId ?? slug,
+        slug,
+        title: buildLiveTitle(transcriptRes.fullText, status.title),
+        viewCount: status.viewersCount ?? 0,
+        createdAt: new Date().toISOString(),
+        durationSeconds: recordedSec,
+        url: `https://www.twitch.tv/${config.streamer.channelLogin}`,
+        gameName: status.gameName ?? "Grand Theft Auto VI",
+        sourceType: "live-stream",
+        rawPath,
+        hypeScore: score,
+        transcript: transcriptRes.fullText,
+      },
+    ];
   }
 
-  const { score, matchedKeywords } = scoreHypeMoment({
-    meanVolumeDb,
-    maxVolumeDb,
-    transcript: transcriptRes.fullText,
-    wordCount: transcriptRes.words.length,
-    durationSec,
+  if (transcriptRes.usedFallback) {
+    console.warn(`[live] No word timings for the ${recordedSec.toFixed(0)}s recording; deleting it without cutting clips.`);
+    deleteRecording(rawPath, projectDir);
+    return [];
+  }
+
+  const timeline = measureLoudnessTimeline(rawPath, probeWorkDir);
+  const fallbackVolume = timeline.length > 0 ? null : measureAudioDb(rawPath);
+  const windows = pickMinedClips({
+    words: transcriptRes.words,
+    durationSec: recordedSec,
+    minHypeScore,
+    forceKeep,
+    volumeForWindow: (startSec, endSec) =>
+      fallbackVolume ?? volumeInWindow(timeline, startSec, endSec),
   });
+
+  if (windows.length === 0) {
+    console.log(`[live] No viral windows in the ${recordedSec.toFixed(0)}s recording; deleting it.`);
+    deleteRecording(rawPath, projectDir);
+    return [];
+  }
 
   console.log(
-    `[live] Hype score=${score}/100 (max=${maxVolumeDb}dB, mean=${meanVolumeDb}dB, words=${transcriptRes.words.length}, kw=[${matchedKeywords.join(", ")}])`,
+    `[live] Mined ${windows.length} clip(s) from ${recordedSec.toFixed(0)}s: ${windows
+      .map((window) => `${window.startSec.toFixed(0)}-${window.endSec.toFixed(0)}s score=${window.score}`)
+      .join(", ")}`,
   );
 
-  if (!forceKeep && score < minHypeScore) {
-    console.log(`[live] Score ${score} below threshold ${minHypeScore}; discarding segment.`);
-    fs.rmSync(rawPath, { force: true });
-    fs.rmSync(path.join(config.projectsDir, slug), { recursive: true, force: true });
-    return null;
+  const mined: ClipCandidate[] = [];
+  for (const window of windows) {
+    const clipSlug = `${slug}-t${Math.round(window.startSec)}`;
+    const clipPath = path.join(config.rawDir, `${clipSlug}.mp4`);
+    const span = Math.max(1, window.endSec - window.startSec);
+    try {
+      cutLiveClip(rawPath, clipPath, window.startSec, span);
+      mined.push({
+        id: `${status.streamId ?? slug}-${Math.round(window.startSec)}`,
+        slug: clipSlug,
+        title: buildLiveTitle(window.transcript, status.title),
+        viewCount: status.viewersCount ?? 0,
+        createdAt: new Date().toISOString(),
+        durationSeconds: span,
+        url: `https://www.twitch.tv/${config.streamer.channelLogin}`,
+        gameName: status.gameName ?? "Grand Theft Auto VI",
+        sourceType: "live-stream",
+        rawPath: clipPath,
+        hypeScore: window.score,
+        transcript: window.transcript,
+      });
+    } catch (err) {
+      console.warn(`[live] Failed cutting ${clipSlug}: ${String(err)}`);
+      fs.rmSync(clipPath, { force: true });
+    }
   }
 
-  return {
-    id: status.streamId ?? slug,
-    slug,
-    title: buildLiveTitle(transcriptRes.fullText, status.title),
-    viewCount: status.viewersCount ?? 0,
-    createdAt: new Date().toISOString(),
-    durationSeconds: durationSec,
-    url: `https://www.twitch.tv/${config.streamer.channelLogin}`,
-    gameName: status.gameName ?? "Grand Theft Auto VI",
-    sourceType: "live-stream",
-    rawPath,
-    hypeScore: score,
-    transcript: transcriptRes.fullText,
-  };
+  if (mined.length === 0) {
+    console.warn(`[live] Cutting failed; keeping the ${recordedSec.toFixed(0)}s recording.`);
+    return [];
+  }
+
+  deleteRecording(rawPath, projectDir);
+  console.log(`[cleanup] Deleted the ${recordedSec.toFixed(0)}s source after cutting ${mined.length} clip(s).`);
+  return mined;
 }
