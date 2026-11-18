@@ -1,0 +1,21 @@
+# Cursor Agent Rules — kai-gta6-opencut-agent
+
+## Project Overview
+Autonomous **Kai Cenat GTA 6 Live Stream Auto-Clipper, OpenCut 9:16 Vertical Editor & Google Drive Bot**.
+
+- **Twitch Source (`src/sources/twitch.ts`)**: Polls Twitch GQL (`twitch.tv/kaicenat`) for live `Grand Theft Auto VI` status, captures live HLS segments (skipping Twitch's 30s pre-roll slate with `-ss 34` and filtering out commercial breaks), scores hype moments (audio `volumedetect` dB + Whisper transcript keywords/pace), and fetches top viral GTA 6 clips.
+- **Transcription (`src/editor/transcribe.ts`)**: Extracts 16kHz mono WAV via `ffmpeg` and transcribes word-level timings with local `whisper-cli.exe` (`ggml-base.en.bin`).
+- **OpenCut Project (`src/editor/opencutProject.ts`)**: Validates and generates `VideoProjectConfig`, `VideoConfig`, `TimelineSegment[]`, and `SubtitleSegment[]` via `opencut` (`validateProject`), writing artifacts to `public/projects/<slug>/`.
+- **Renderer (`src/editor/render.ts`, `src/video/KaiClipComposition.tsx`)**: Produces `1080x1920` (`30fps`, `h264`/`aac`) split-screen Shorts/TikToks via the fast `ffmpeg` ASS compositor (default) or `--renderer remotion`, verified with `ffprobe`.
+- **Google Drive (`src/drive/gdrive.ts`)**: Resolves/creates the `kaiclips` folder via `gdrive` (auto-falling back to `~/.gemini/config/plugins/gdrive/skills/gdrive/scripts/gdrive.cmd` when outside Antigravity's PATH) and deduplicates uploads via `data/state.json`.
+
+## Primary Commands
+- `npm run watch` — Start the continuous auto-clipping & Drive upload daemon (`--interval 180`)
+- `npm run once` — Run a single live + viral clip cycle
+- `npm run status` — Inspect live stream status, Drive `kaiclips` files, and processed clip log
+- `npx tsx src/cli.ts clip-url <twitch-clip-url>` — Edit & upload a specific clip
+- `npm run studio` — Open Remotion/OpenCut visual preview
+- `npm run build && npm test` — Typecheck & run pipeline smoke test
+
+## Environment Overrides
+Adjust facecam crop ratios in `.env` if Kai moves his webcam (`FACECAM_X_RATIO`, `FACECAM_Y_RATIO`, `FACECAM_W_RATIO`, `FACECAM_H_RATIO`). Defaults target his bottom-left GTA 6 layout (`0.0, 0.65, 0.26, 0.35`).

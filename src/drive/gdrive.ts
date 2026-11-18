@@ -20,8 +20,26 @@ function quoteWinArg(arg: string): string {
   return `"${arg.replace(/"/g, '\\"')}"`;
 }
 
+function resolveGdriveBin(): string {
+  try {
+    const checkCmd = process.platform === "win32" ? "where gdrive" : "command -v gdrive";
+    execSync(checkCmd, { stdio: "ignore" });
+    return "gdrive";
+  } catch {
+    if (config.binaries.gdriveBootstrapCmd && fs.existsSync(config.binaries.gdriveBootstrapCmd)) {
+      return quoteWinArg(config.binaries.gdriveBootstrapCmd);
+    }
+    return "gdrive";
+  }
+}
+
+let cachedGdriveBin: string | null = null;
+
 function runGdrive(args: string[]): string {
-  const cmd = `gdrive ${args.map(quoteWinArg).join(" ")}`;
+  if (!cachedGdriveBin) {
+    cachedGdriveBin = resolveGdriveBin();
+  }
+  const cmd = `${cachedGdriveBin} ${args.map(quoteWinArg).join(" ")}`;
   return execSync(cmd, {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
