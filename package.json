@@ -1,0 +1,37 @@
+{
+  "name": "kai-gta6-opencut-agent",
+  "version": "1.0.0",
+  "description": "Autonomous Kai Cenat GTA 6 live stream auto-clipper, OpenCut 9:16 vertical editor & Google Drive bot — built in 21 mins with Argon Orchestrator",
+  "private": false,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ElizaBackrooms/kai-gta6-opencut-agent.git"
+  },
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit",
+    "once": "tsx src/cli.ts once",
+    "watch": "tsx src/cli.ts watch",
+    "status": "tsx src/cli.ts status",
+    "studio": "remotion studio src/video/index.ts",
+    "test": "tsx tests/pipeline.test.ts"
+  },
+  "dependencies": {
+    "@remotion/bundler": "^4.0.286",
+    "@remotion/cli": "^4.0.286",
+    "@remotion/renderer": "^4.0.286",
+    "commander": "^13.1.0",
+    "opencut": "^0.1.0",
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
+    "remotion": "^4.0.286",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.4",
+    "@types/react": "^19.0.10",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3"
+  }
+}

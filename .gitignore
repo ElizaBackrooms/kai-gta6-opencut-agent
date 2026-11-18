@@ -1,0 +1,8 @@
+node_modules/
+dist/
+out/*.mp4
+public/raw/*.mp4
+public/projects/
+data/state.json
+.env
+*.log
